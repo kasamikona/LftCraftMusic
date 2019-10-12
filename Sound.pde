@@ -1,18 +1,12 @@
-int[] freqTbl = {
-  0x004a, 0x004e, 0x0053, 0x0058, 0x005d, 0x0063, 0x0068, 0x006f, 
-  0x0075, 0x007c, 0x0084, 0x008c, 0x0094, 0x009d, 0x00a6, 0x00b0, 
-  0x00bb, 0x00c6, 0x00d1, 0x00de, 0x00eb, 0x00f9, 0x0108, 0x0118, 
-  0x0128, 0x013a, 0x014d, 0x0161, 0x0176, 0x018c, 0x01a3, 0x01bc, 
-  0x01d7, 0x01f3, 0x0211, 0x0230, 0x0251, 0x0275, 0x029a, 0x02c2, 
-  0x02ec, 0x0318, 0x0347, 0x0379, 0x03ae, 0x03e6, 0x0422, 0x0461, 
-  0x04a3, 0x04ea, 0x0535, 0x0584, 0x05d8, 0x0631, 0x068f, 0x06f3, 
-  0x075d, 0x07cd, 0x0844, 0x08c2, 0x0947, 0x09d4, 0x0a6a, 0x0b08, 
-  0x0bb0, 0x0c62, 0x0d1f, 0x0de7, 0x0eba, 0x0f9b, 0x1088, 0x1184, 
-  0x128e, 0x13a9, 0x14d4, 0x1611, 0x1761, 0x18c5, 0x1a3e, 0x1bce, 
-  0x1d75, 0x1f36, 0x2111, 0x2308
-};
+import javax.sound.sampled.*;
+import java.util.Arrays;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.nio.FloatBuffer;
+import java.nio.ByteBuffer;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 
-int[] sineTblBytes = { // ((byte) round(sin(i * PI / 128f) * 127f)) & 0xFF;
+int[] sineTbl = { // ((byte) round(sin(i * PI / 128f) * 127f)) & 0xFF;
   0x00, 0x03, 0x06, 0x09, 0x0C, 0x10, 0x13, 0x16, 0x19, 0x1C, 0x1F, 0x22, 0x25, 0x28, 0x2B, 0x2E,
   0x31, 0x33, 0x36, 0x39, 0x3C, 0x3F, 0x41, 0x44, 0x47, 0x49, 0x4C, 0x4E, 0x51, 0x53, 0x55, 0x58,
   0x5A, 0x5C, 0x5E, 0x60, 0x62, 0x64, 0x66, 0x68, 0x6A, 0x6B, 0x6D, 0x6F, 0x70, 0x71, 0x73, 0x74,
@@ -31,80 +25,182 @@ int[] sineTblBytes = { // ((byte) round(sin(i * PI / 128f) * 127f)) & 0xFF;
   0xCF, 0xD2, 0xD5, 0xD8, 0xDB, 0xDE, 0xE1, 0xE4, 0xE7, 0xEA, 0xED, 0xF0, 0xF4, 0xF7, 0xFA, 0xFD
 };
 
-int[] sineTbl;
-{
-  sineTbl = new int[sineTblBytes.length];
-  for(int i = 0; i < 256; i++) sineTbl[i] = (byte) sineTblBytes[i];
-}
-
-
-public class CraftUgen extends UGen {
+public class NativeSoundPlayer extends Thread {
+  boolean debug = false;
   private CraftSampler sampler;
-  public CraftUgen(CraftMusic mus) {
-    sampler=new CraftSampler(mus);
+  private SourceDataLine line;
+  private boolean finished=false;
+  private byte[] internalBuffer;
+  private int intBufSamples;
+  private int extBufSamples;
+  private AudioFormat format;
+  private AudioFormat formatRecord;
+  private ByteArrayOutputStream recordBuffer;
+  private File recordFile;
+  private boolean doRecord=false;
+  public NativeSoundPlayer(CraftMusic mus, int sampleRate, File recFile, float outSpeedMult) {
+    recordFile=recFile;
+    if (recordFile != null) doRecord = true;
+    extBufSamples = sampleRate / 10; // 100ms/6frame buffer
+    intBufSamples = sampleRate / 20; // 50ms/3frame chunk size
+    internalBuffer=new byte[intBufSamples * 2 * 2];
+    sampler = new CraftSampler(mus);
+    sampler.initSampleRate(sampleRate);
+    try {
+      format = new AudioFormat((float)sampleRate * outSpeedMult, 8 * 2, 2, true, false);
+      formatRecord = new AudioFormat((float)sampleRate, 8 * 2, 2, true, false);
+      line = (SourceDataLine) AudioSystem.getSourceDataLine(format);
+      line.open(format, extBufSamples * 2 * 2);
+    } 
+    catch(LineUnavailableException e) {
+      println("Couldn't get audio output!");
+      finished = true;
+      return;
+    }
   }
-  public void sampleRateChanged() {
-    sampler.initSampleRate(sampleRate());
+  public void open() {
+    if (finished) return;
+    if (doRecord) {
+      recordBuffer = new ByteArrayOutputStream();
+      println("Beginning soundtrack recording");
+    }
+    start();
+    if (debug) println("Audio output started");
   }
-  public void uGenerate(float[] channels) {
-    float sample=sampler.getOutputSample();
-    for (int i=channels.length-1; i>=0; i--) channels[i] = sample;
+  public void close() {
+    if (finished) return;
+    finished=true;
+    if (recordFile!=null) {
+      println("Saving soundtrack recording...");
+      ByteArrayInputStream b_in = new ByteArrayInputStream(recordBuffer.toByteArray());
+      AudioInputStream ais = new AudioInputStream(b_in, formatRecord, recordBuffer.size());
+      try {
+        AudioSystem.write(ais, AudioFileFormat.Type.WAVE, recordFile);
+      }
+      catch(IOException e) {
+        println("Couldn't write to file " + recordFile.getAbsolutePath());
+      }
+    }
+    if (debug) println("Audio output finished");
+  }
+  public void run() {
+    if (finished) return;
+    line.start();
+    while (!finished) {
+      int offset = 0;
+      // Generate sample buffer
+      for (int i = 0; i < intBufSamples; i++) {
+        short sampleL = (short)(int)min(max(-32768, round(32767 * sampler.getOutputSample())), 32767);
+        short sampleR = sampleL;
+        internalBuffer[offset++] = (byte)(sampleL >> 0);
+        internalBuffer[offset++] = (byte)(sampleL >> 8);
+        internalBuffer[offset++] = (byte)(sampleR >> 0);
+        internalBuffer[offset++] = (byte)(sampleR >> 8);
+      }
+      // Copy internal buffer to record buffer
+      if (doRecord) {
+        recordBuffer.write(internalBuffer, 0, internalBuffer.length);
+      }
+      // Wait for space to become available
+      while (line.available() < intBufSamples << 2) {
+        try {
+          Thread.sleep(1);
+        }
+        catch (InterruptedException nom) {
+        }
+      }
+      line.write(internalBuffer, 0, internalBuffer.length);
+    }
+    line.flush();
+    line.stop();
+    line.close();
+    line = null;
+  }
+  public boolean musicFinished() {
+    return sampler.musicFinished();
   }
 }
 
 public class CraftSampler {
-  int craftSamplesPerFrame=525;
-  int sampleMultiplier;
-  float relativeSampleRate;
-  float relativeSampleRateDivided;
-  float partialSample=0;
+  boolean antiAlias=false;
+  boolean filter=false;
+  float craftSampleRate = 525f * 20000000f / 333375f;
+  float sampleRate;
+  float sampleRateInverse;
   float lastCraftSample=0;
+  float partialSample;
+  float relativeSampleRate;
   CraftMusic musicInstance;
+  OutputFilter outFilter;
+  int finishedTime=0;
   public CraftSampler(CraftMusic music) {
     musicInstance=music;
+    outFilter = new OutputFilter();
+    // Calculated by rough impedance 1k, C=10uF
+    outFilter.setDcRC(0.01); // RC constant for (high pass) DC filter
+    // Tweaked by ear and by comparing waveforms to match the original recording
+    outFilter.setLpRC(0.00175); // RC constant for implicit low pass filter
+    outFilter.setLpFactor(0.0); // How much of the low pass to mix in
+    outFilter.setAmplitude(0.875); // How loud to make the final output (roughly match high quality mode)
   }
   public void initSampleRate(float sr) {
-    float craftFrameRate = 20000000/333375f;
-    float craftSampleRate = craftFrameRate*craftSamplesPerFrame;
-    relativeSampleRate = craftSampleRate/sr;
+    sampleRate = sr;
+    sampleRateInverse = 1f / sr;
+    relativeSampleRate = craftSampleRate * sampleRateInverse;
+    outFilter.setDt(sampleRateInverse);
   }
   public float getOutputSample() {
     float partialSampleLast = partialSample;
     partialSample += relativeSampleRate;
-    float ret = lastCraftSample;
+    float antiAliasSample = lastCraftSample;
     if (partialSample >= 1) {
       float remaining = 1 - partialSampleLast;
       float totalSamples = remaining;
-      ret = lastCraftSample * remaining;
+      antiAliasSample = lastCraftSample * remaining;
       for (int i=1; i<=partialSample-1; i++) {
         float intermediate = musicInstance.getSample();
-        ret += intermediate;
+        antiAliasSample += intermediate;
         totalSamples++;
       }
       partialSample -= floor(partialSample);
       lastCraftSample = musicInstance.getSample();
-      ret += lastCraftSample * partialSample;
+      antiAliasSample += lastCraftSample * partialSample;
       totalSamples += partialSample;
-      ret /= totalSamples;
+      antiAliasSample /= totalSamples;
     }
-    return lastCraftSample;
-    //return ret;
+    finishedTime++;
+    if (!musicInstance.flag_songend) finishedTime = 0;
+    float out = antiAlias ? antiAliasSample : lastCraftSample;
+    float outFiltered = outFilter.doSample(out);
+    float ret = filter ? outFiltered : out;
+    return ret;
+  }
+  public boolean musicFinished() {
+    return finishedTime >= sampleRate;
   }
 }
 
 public class CraftMusic {
-  
-    boolean debug=false;
+  int[] swingTable = {4, 4, 4, 4}; // 3,3,5,5 or 3,3,6,4 work well for swingtempo
+  boolean debug = true;
+  boolean highDac = false;
+  int precalcSamples = 0;
+
   private byte[] trackdata;
   private byte[] instrdata;
   private byte instrtab_pre;
   private byte[] instrtab;
   private byte[] tracktab;
   private byte[] song;
-  private int videoLine=0;
-  private int songPointer=0;
-  private int trackPos=0;
-  private int trackTimer=0;
+  private int[] freqTbl;
+  private int songPointer = 0;
+  private int trackPos = 0;
+  private int trackTimer = 0;
+  private int videoLine = 0;
+  private int vblankTime = 0;
+  // Mode defines the entry point for sample generation
+  // 0 = vblank timer interrupt, 1 = vblank timer syncing, 2 = video lines drawing
+  private int mode = 0;
 
   protected int[] c_tptr = new int[3]; // Track number (not accurate)
   protected int[] c_tbits = new int[3]; // Track bit pointer (not accurate)
@@ -115,51 +211,72 @@ public class CraftMusic {
   protected int[] c_tnote = new int[3]; // Track/original note
   protected int[] c_inote = new int[3]; // Instrument/transpose note
   protected int[] c_bendd = new int[3]; // Bend delta
-  protected int[] c_vold = new int[3]; // Volume delta
+  volatile protected int[] c_vold = new int[3]; // Volume delta
   protected int[] c_vpos = new int[3]; // Vibrato position
   protected int[] c_vrate = new int[3]; // Vibrato rate
   protected int[] c_vdepth = new int[3]; // Vibrato depth
   protected int[] c_freq = new int[3]; // Frequency
-  protected int[] c_vol = new int[3]; // Volume
-  protected int[] c_phase = new int[3]; // Phase (not in original)
+  volatile protected int[] c_vol = new int[3]; // Volume
+  volatile protected int[] c_phase = new int[3]; // Phase (not in original)
   protected int n_vol = 0; // Noise volume
   protected int n_rel = 0; // Noise release
   protected int n_register = 0; // Noise generator register
   protected boolean flag_songend = false;
   protected boolean[] mutes = new boolean[4];
+  protected float lastSample;
 
-  public CraftMusic(String hexTrackdata, String hexInstrdata, String hexInstrtabPre, String hexInstrtab, String hexTracktab, String hexSong) {
+  public CraftMusic(String hexTrackdata, String hexInstrdata, String hexInstrtabPre, String hexInstrtab, String hexTracktab, String hexSong, String hexFreq) {
     trackdata = bytesFromHexString(hexTrackdata);
     instrdata = bytesFromHexString(hexInstrdata);
     instrtab_pre = bytesFromHexString(hexInstrtabPre)[0];
     instrtab = bytesFromHexString(hexInstrtab);
     tracktab = bytesFromHexString(hexTracktab);
     song = bytesFromHexString(hexSong);
+    byte[] freqTblBytes = bytesFromHexString(hexFreq);
+    freqTbl = new int[129];
+    if (freqTblBytes.length < 258) {
+      println("Frequency table missing tail data, results may be inaccurate.");
+    }
+    for (int i = 0; i < min(129, freqTblBytes.length >> 1); i++) {
+      freqTbl[i] = (freqTblBytes[i << 1] & 0xFF) | ((freqTblBytes[(i << 1) | 1] & 0xFF) << 8);
+      //println("freqTbl["+hex(i,3)+"] = "+hex(freqTbl[i],4));
+    }
+    //for(int i=0; i<sineTbl.length; i++) sineTbl[i] = 0; // HACK TO DISABLE VIBRATO
     reset();
   }
   public void reset() {
+    n_register = 0x0001;
+    for(int i = 0; i < precalcSamples; i++) {
+      soundroutine();
+    }
     songPointer = 0;
     trackPos = 0;
+    // Sync entry point is important!
     videoLine = 0;
-    n_register = 0x0001;
+    vblankTime = 0;
+    mode = 2;
+    for(int ch = 0; ch < 3; ch++) {
+      c_vpos[ch] = 0;
+    }
     // TODO: reset other sound registers
     flag_songend = false;
+    lastSample = 0;
   }
   private void playroutine() {
-    if(!flag_songend) { // up to play_sound
+    if (!flag_songend) { // up to play_sound
       trackTimer--;
-      if(trackTimer < 0) { // up to play_nonewline
+      if (trackTimer < 0) { // up to play_nonewline
         trackPos--;
-        if(trackPos < 0) { // up to play_nonewpos
+        if (trackPos < 0) { // up to play_nonewpos
           // new track
           // loop through channels
-          for(int ch = 0; ch < 3; ch++) {
+          for (int ch = 0; ch < 3; ch++) {
             int songLineData = readBits(song, songPointer, 6);
             songPointer += 6;
             int newTrack = songLineData & 0x3F;
-            if(songLineData != 0) {
+            if (songLineData != 0) {
               newTrack--;
-              int trackStructIndex = 3 * (newTrack >>> 1); //(newTrack & 0x3E) + (newTrack >> 1); // 3 * (trackNum >> 1)
+              int trackStructIndex = 3 * (newTrack >>> 1);
               int trackStructFirst = (tracktab[trackStructIndex] & 0xFF) | ((tracktab[trackStructIndex + 1] & 0xF0) << 4);
               int trackStructSecond = ((tracktab[trackStructIndex + 1] & 0x0F) << 8) | (tracktab[trackStructIndex + 2] & 0xFF);
               c_tbits[ch] = (((newTrack & 1) == 0) ? trackStructFirst : trackStructSecond) << 3;
@@ -170,31 +287,30 @@ public class CraftMusic {
           trackPos = 31;
         }
         // loop through channels
-        for(int ch = 0; ch < 3; ch++) {
-          //if(ch != 1) continue;
-          if(c_tptr[ch] != 0) { // up to play_notrack
+        for (int ch = 0; ch < 3; ch++) {
+          if (c_tptr[ch] != 0) { // up to play_notrack
             int hasInstrumentNote = readBits(trackdata, c_tbits[ch], 2);
             c_tbits[ch] += 2;
             if ((hasInstrumentNote & 2) > 0) { // Instrument
               int instrument = readBits(trackdata, c_tbits[ch], 5);
               c_tbits[ch] += 5;
               int instrumentPtr = 0;
-              if(instrument > 0 && instrument < instrtab.length) instrumentPtr = instrtab[instrument - 1] & 0xFF;
-              else if(instrument == 0) instrumentPtr = instrtab_pre;
+              if (instrument > 0 && instrument <= instrtab.length) instrumentPtr = instrtab[instrument - 1] & 0xFF;
+              else if (instrument == 0) instrumentPtr = instrtab_pre;
               c_lasti[ch] = instrumentPtr;
               c_iptr[ch] = instrumentPtr;
               c_iloop[ch] = 0;
               c_timer[ch] = 0;
-              if(debug) println("CH" + ch + " Instrument set 0x" + hex(instrument, 2) + " (ptr 0x" + hex(instrumentPtr, 2) + ")");
+              if (debug) println("CH" + ch + " Instrument set 0x" + hex(instrument, 2) + " (ptr 0x" + hex(instrumentPtr, 2) + ")");
             }
             if ((hasInstrumentNote & 1) > 0) { // Note
               int note = readBits(trackdata, c_tbits[ch], 7);
-              note--;
               c_tbits[ch] += 7;
+              note--;
               // plonk
               c_vol[ch] = 0;
               c_iptr[ch] = c_lasti[ch];
-              if(debug) println("CH" + ch + " Instrument trigger ptr 0x" + hex(c_lasti[ch], 2));
+              if (debug) println("CH" + ch + " Instrument trigger ptr 0x" + hex(c_lasti[ch], 2));
               c_iloop[ch] = 0;
               c_timer[ch] = 0;
               c_tnote[ch] = note;
@@ -206,225 +322,256 @@ public class CraftMusic {
             }
           }
         }
-        trackTimer = 3; // tempo - 1
+        trackTimer = swingTable[trackPos & 3] - 1; // tempo - 1
       }
     }
     // play_sound
-    for(int ch = 0; ch < 3; ch++) {
+    for (int ch = 0; ch < 3; ch++) {
       int timer;
-      while(true) {
-        int instrumentPointer = c_iptr[ch] - 1;
+      while (true) {
+        int instrumentPointer = c_iptr[ch];
         timer = c_timer[ch];
-        if(instrumentPointer < 0) break;
-        if(timer != 0) break;
-        int commandByte = instrdata[instrumentPointer] & 0xFF;
-        instrumentPointer += 2;
-        c_iptr[ch] = instrumentPointer;
-        runCommand(ch, commandByte);
+        instrumentPointer--; // Offset by 1 for hardcoded instrument 0 at iptr=0
+        if (instrumentPointer >= 0 && timer == 0) {
+          int commandByte = instrdata[instrumentPointer] & 0xFF;
+          instrumentPointer += 2; // Increment, accounting for offset
+          c_iptr[ch] = instrumentPointer;
+          runCommand(ch, commandByte);
+        } else break;
       }
       timer--;
-      if(timer >= 0) {
+      boolean c = timer<0;
+      timer &= 0xFF;
+      if (!c) {
         c_timer[ch] = timer;
       }
       int note = c_inote[ch]; // here's our note value in 8.8 format
-    
       int vibPos = c_vpos[ch];
-      int vibSine = (byte)sineTbl[vibPos];
-      int vibDepth = c_vdepth[ch];
-      int vibAmount = (vibSine * vibDepth)&0xFFFF; // r1:r0 is wanted vibrato offset times 64
-      int strayCarry = vibAmount >>> 15; // Emualte quirk of over-optimised ASM code
-      // NOTE: The stray carry ends up getting discarded anyway, no need to emulate!
-      int vibAmountHigh = 0;
-      if(vibAmount >= 0x8000) {
-        vibAmountHigh = 255;
+      int vibSine = sineTbl[vibPos] & 0xFF;
+      if (vibSine >= 0x80) { // Make signed
+        vibSine |= 0xFF00;
       }
-      vibAmountHigh = (vibAmountHigh << 2) | (vibAmount >>> 14);
-      vibAmount = ((vibAmount << 2) & 0xFFFF) | (strayCarry << 1);
-      
-      note += (vibAmountHigh << 8) | (vibAmount >> 8); // update note
+      int vibDepth = c_vdepth[ch];
+      int vibAmount = (vibSine * vibDepth) & 0xFFFF; // r1:r0 is wanted vibrato offset times 64
+      int strayCarry = vibAmount >>> 14; // Emualte quirk of over-optimised ASM code
+      // NOTE: The stray carry ends up getting discarded anyway, no need to emulate!
+      if (vibAmount >= 0x8000) {
+        vibAmount |= 0xFF0000;
+      }
+      vibAmount = ((vibAmount << 2) & 0xFFFFFC) | strayCarry;
+
+      note += vibAmount >>> 8; // update note
       note &= 0xFFFF;
       vibPos += c_vrate[ch];
       vibPos &= 0xFF;
       c_vpos[ch] = vibPos;
-      int freqIndex = note >> 8;
-      int freqIndexNext = freqIndex + 1;
-      // Added to prevent array length overflow - extreme notes won't glitch
-      int maxIndex = freqTbl.length - 1;
-      if(freqIndex >= maxIndex - 1) {
-        if(freqIndex >= maxIndex) {
-          freqIndex = maxIndex;
-        }
-        freqIndexNext = maxIndex;
-      }
-      if(freqIndex < 0) {
-        freqIndex = 0;
-        freqIndexNext = 0;
-      }
+      int freqIndex = note >>> 8;
+      // In source, index is a pointer offset to 2-byte data, so 128 possible indices
+      freqIndex &= 0x7F;
+      //if(freqIndex > 82) println("FREQBUG "+freqIndex);
       int freq = freqTbl[freqIndex];
-      int freqDist = freqTbl[freqIndexNext] - freq;
+      freq &= 0xFFFF;
+      int freqDist = (freqTbl[freqIndex + 1] - freq) & 0xFFFF;
       int noteLow = note & 0xFF;
-      int multResult = (freqDist >> 8) * noteLow; // r1:r0 is product of hi(dist) and lo(note)
-      multResult += ((freqDist & 0xFF) * noteLow) >> 8; // r1:r0 is product of lo(dist) and lo(note)
+      int multResult = (freqDist >>> 8) * noteLow; // product of hi(dist) and lo(note)
+      multResult += ((freqDist & 0xFF) * noteLow) >>> 8; // product of lo(dist) and lo(note)
       freq += multResult;
+      freq &= 0xFFFF;
       note = c_inote[ch];
-      int bendDelta = c_bendd[ch];
-      if(bendDelta >= 0x80) {
-        bendDelta -= 256;
+      int bendDelta = c_bendd[ch] & 0xFF;
+      if (bendDelta >= 0x80) {
+        bendDelta |= 0xFF00;
       }
       note = (note + bendDelta + bendDelta) & 0xFFFF;
-      if(note >= 0x8000) {
+      if (note >= 0x8000) {
         note = 0;
       }
       c_inote[ch] = note;
-  
+
       int volume = c_vol[ch];
       int volumeDelta = c_vold[ch];
       volume += volumeDelta;
       volume &= 0xFF;
-      if(volume >= 0x80) { // clamp negative to 0
+      if ((volume & 0x80) > 0) { // clamp negative to 0
+        //if(ch==2)println("VOLNEG CH"+ch);
         volume = 0;
       }
-      if(volume >= 32) { // clamp to max
+      if ((volume & 0x20) > 0) { // clamp to max
         volume = 31;
       }
-      
+
       // stop oscillator if silent
-      if(volume == 0) {
+      if (volume == 0) {
         freq = 0;
       }
-      
+
       c_freq[ch] = freq;
       c_vol[ch] = volume;
     }
     n_vol = (n_vol - n_rel) & 0xFF;
-    if(n_vol >= 0x80) { // clamp negative to 0
+    if (n_vol >= 0x80) { // clamp negative to 0
       n_vol = 0;
     }
   }
-  
+
   void runCommand(int ch, int cmd) {
-    if(debug) print("CH" + ch + " Command 0x" + hex(cmd, 2)+": ");
+    //boolean debug = true; // override
+    if (debug) print("CH" + ch + " Command 0x" + hex(cmd, 2)+": ");
     int param = cmd & 0xF;
     int paramHi = param << 4;
     cmd >>>= 4;
     switch(cmd) {
     case 0:
       c_iptr[ch] = c_iloop[ch];
-      if(debug) {
+      if (debug) {
         print("GOLP");
-        if(c_iptr[ch] == 0) print(" (stop)");
+        if (c_iptr[ch] == 0) print(" (stop)");
       }
       break;
     case 1:
       c_iloop[ch] = c_iptr[ch];
-      if(debug) print("SELP (at 0x"+hex(c_iptr[ch], 2)+")");
+      if (debug) print("SELP (at 0x"+hex(c_iptr[ch], 2)+")");
       break;
       // 2 invalid
     case 3:
       c_bendd[ch] = paramHi;
-      if(debug) print("BNDD 0x"+hex(c_bendd[ch], 2));
+      if (debug) print("BNDD 0x"+hex(c_bendd[ch], 2));
       break;
     case 4:
-      c_vrate[ch] = paramHi>>>1;
-      if(debug) print("VIBR 0x"+hex(c_vrate[ch], 2));
+      c_vrate[ch] = (paramHi >>> 1) & 0x7F;
+      if (debug) print("VIBR 0x"+hex(c_vrate[ch], 2));
       break;
     case 5:
       c_vdepth[ch] = paramHi;
-      if(debug) print("VIBD 0x"+hex(c_vdepth[ch], 2));
+      if (debug) print("VIBD 0x"+hex(c_vdepth[ch], 2));
       break;
     case 6:
       c_vol[ch] = param << 1;
-      if(debug) print("VOLS 0x"+hex(c_vol[ch], 2));
+      if (debug) print("VOLS 0x"+hex(c_vol[ch], 2));
       break;
     case 7:
-      c_vold[ch] = param | ((param >= 8) ? 0xF0 : 0);
-      if(debug) print("VOLD 0x"+hex(c_vold[ch], 2));
+      int paramSigned = param | ((param & 0x08) > 0 ? 0xF0 : 0);
+      c_vold[ch] = paramSigned;
+      if (debug) print("VOLD 0x"+hex(c_vold[ch], 2));
       break;
       // 8 invalid
     case 9:
+      int vnew = param;
+      vnew <<= 1;
+      vnew &= 0x18;
       int rnew = 4 - (param & 3);
-      if (n_vol == 0 || n_rel > rnew) {
-        n_vol = (param << 1) & 0x18;
+      if (n_vol == 0 || rnew < n_rel) {
+        n_vol = vnew;
         n_rel = rnew;
-        if(debug) print("NOIS V=0x"+hex(n_vol, 2)+" R=0x"+hex(n_rel, 2));
-      } else if(debug) print("NOIS (no change)");
+        if (debug) print("NOIS V=0x"+hex(n_vol, 2)+" R=0x"+hex(n_rel, 2));
+      } else if (debug) print("NOIS (no change)");
       break;
     case 10:
       c_inote[ch] &= 0x00FF;
-      c_inote[ch] |= (c_tnote[ch] + param) << 8;
-      if(debug) print("TPNU 0x" + param + "( to 0x" + hex(c_inote[ch], 4) + ")");
+      c_inote[ch] |= ((c_tnote[ch] + param) & 0xFF) << 8;
+      if (debug) print("TPNU 0x" + hex(param, 2) + " (to 0x" + hex(c_inote[ch], 4) + ")");
       break;
     case 11:
       c_inote[ch] &= 0x00FF;
-      c_inote[ch] |= (c_tnote[ch] - param) << 8;
-      if(debug) print("TPND 0x" + param + "( to 0x" + hex(c_inote[ch], 4) + ")");
+      c_inote[ch] |= ((c_tnote[ch] - param) & 0xFF) << 8;
+      if (debug) print("TPND 0x" + hex(param, 2) + " (to 0x" + hex(c_inote[ch], 4) + ")");
       break;
       // 12 invalid
     case 13:
       c_timer[ch] = param;
-      if(debug) print("WAIT 0x"+hex(param, 2));
+      if (debug) print("WAIT 0x" + hex(param, 2));
       break;
     case 14:
       c_timer[ch] = paramHi;
-      if(debug) print("WAIT 0x"+hex(paramHi, 2));
+      if (debug) print("WLNG 0x" + hex(paramHi, 2));
       break;
     case 15:
     default:
       flag_songend = true;
-      if(debug) {
-        if(cmd == 15) print("ENDS");
+      if (debug) {
+        if (cmd == 15) print("ENDS");
         else print("ILLEGAL/ENDS");
       }
       break;
     }
-    if(debug) println();
+    if (debug) {
+      println();
+      //println("-> CMD="+hex(cmd,2)+", Param="+hex(param,2)+", ParamHi="+hex(paramHi,2));
+    }
   }
-  public float getSample() {
-    videoLine++;
-    if (videoLine >= 525) videoLine = 0;
-    if (videoLine == 0) playroutine();
-
+  private void soundroutine() {
     for (int i = 0; i < 3; i++) {
       c_phase[i] = (c_phase[i] + c_freq[i]) & 0xFFFF;
     }
-    
-    n_register += n_register;
-    if((n_register & 0x8000) > 0) n_register ^= 1;
-    if((n_register & 0x4000) > 0) n_register ^= 1;
-    
-    float mvol = 0.4;
+
+    n_register <<= 1;
+    n_register &= 0xFFFF;
+    if ((n_register & 0x8000) > 0) n_register ^= 1;
+    if ((n_register & 0x4000) > 0) n_register ^= 1;
+
     int samp = 0;
 
     // Ch0 - 25% pulse
     int phase0hi = c_phase[0] >>> 8;
-    int wave0 = phase0hi & (phase0hi << 1);
+    int wave0 = (phase0hi << 1) & phase0hi;
     int c0samp = c_vol[0];
-    if(wave0 >= 0x80) c0samp = -c0samp;
-    if(!mutes[0]) samp += c0samp;
+    if (wave0 >= 0x80) c0samp = -c0samp;
+    if (!mutes[0]) samp += c0samp;
 
     // Ch1 - 50% pulse
     int phase1hi = c_phase[1] >>> 8;
     int c1samp = c_vol[1];
-    if(phase1hi >= 0x80) c1samp = -c1samp;
-    if(!mutes[1]) samp += c1samp;
+    if (phase1hi >= 0x80) c1samp = -c1samp;
+    if (!mutes[1]) samp += c1samp;
 
     // Ch2 - Triangle
     int c2samp = c_phase[2] >>> 8;
-    if(c2samp >= 0x80) c2samp = 0xFF - c2samp;
+    if (c2samp >= 0x80) c2samp = 0xFF - c2samp;
     c2samp >>>= 1;
-    if(!mutes[2]) samp += c2samp;
-    
+    if (!mutes[2]) samp += c2samp;
+
     int c3samp = n_vol;
-    if(n_register >= 0x8000) c3samp = (-c3samp) & 0xFF;
-    if(!mutes[3]) samp += c3samp;
+    if (n_register >= 0x8000) c3samp = (-c3samp) & 0xFF;
+    if (!mutes[3]) samp += c3samp;
 
     samp -= 32 + 128;
     samp &= 0xFF;
     int sampMax = 0xFF;
-    //samp >>>= 2;
-    //sampMax >>>= 2;
+    if (!highDac) {
+      samp >>>= 2;
+      sampMax >>>= 2;
+    }
 
-    return map(samp, 0, sampMax, -mvol, mvol);
+    lastSample = map(samp, 0, sampMax, -1, 1);
+    //lastSample = c_vol[2]/31f;
+  }
+  public float getSample() {
+    switch(mode) {
+    case 0: // Timer1 interrupt sync
+    default:
+      soundroutine();
+      if (vblankTime >= 43) {
+        mode = 1;
+      } else vblankTime++;
+      break;
+    case 1: // Final sync with Timer1, start video lines
+      videoLine = 0;
+      soundroutine();
+      mode = 2;
+      break;
+    case 2: // End of video line
+      videoLine++;
+      if (videoLine >= 480) {
+        soundroutine();
+        vblankTime = 0;
+        mode = 0;
+        playroutine();
+        break;
+      }
+      soundroutine();
+      break;
+    }
+    return lastSample;
   }
   private byte[] bytesFromHexString(String s) {
     byte[] b = new byte[(s.length() + 1) >> 1];
@@ -440,5 +587,53 @@ public class CraftMusic {
       if (byteIndex < data.length) value |= (data[byteIndex] >> (7 - (i & 7))) & 1;
     }
     return value;
+  }
+}
+
+class OutputFilter {
+  float dt=0;
+  float dcRC=0;
+  float dcA=0;
+  float dcYLast=0;
+  float dcXLast=0;
+  float lpRC=0;
+  float lpA=0;
+  float lpYLast=0;
+  float lpFactor=0;
+  float amplitude=0;
+  void setDt(float dt) {
+    this.dt=dt;
+    if (dcRC <=0 || dt <= 0)dcA=0;
+    else dcA=dcRC/(dcRC+dt);
+    if (lpRC <=0 || dt <= 0)lpA=0;
+    else lpA=dt/(lpRC+dt);
+  }
+  void setDcRC(float RC) {
+    this.dcRC=RC;
+    if (dcRC <= 0 || dt <= 0)dcA=0;
+    else dcA=dcRC/(dcRC+dt);
+  }
+  void setLpRC(float RC) {
+    this.lpRC=RC;
+    if (lpRC <=0 || dt <= 0)lpA=0;
+    else lpA=dt/(lpRC+dt);
+  }
+  void setLpFactor(float lpFactor) {
+    this.lpFactor=min(max(0, lpFactor), 1);
+  }
+  void setAmplitude(float amplitude) {
+    this.amplitude=min(max(0, amplitude), 1);
+  }
+  private float sampleDc(float x) {
+    float y = dcA*(dcYLast+x-dcXLast);
+    dcXLast=x;
+    dcYLast=y;
+    return y;
+  }
+  float doSample(float x) {
+    float xd = sampleDc(x);
+    float y = (lpA * xd) + ((1-lpA) * lpYLast);
+    lpYLast=y;
+    return (xd+(y*lpFactor))*amplitude;
   }
 }
