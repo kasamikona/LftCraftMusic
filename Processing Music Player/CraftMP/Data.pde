@@ -1,3 +1,11 @@
+/*
+The following data was extracted from compiled and uncompiled versions
+of the "Craft" program/demo by Linus Åkesson (lft). This should be
+fine for non-commercial use but I'm no lawyer. If there is any issue
+with storing data this way, I will update the code to pull it from the
+original files which the user must obtain from the official source.
+*/
+
 // song.S
 public String m_trackdata =
   "C6B80000096624F3B0B39D8599893938C2D40C4A45A8C6D800984D9D8598B59D85B4EC2D67429D859CE853B0B12118584EC2C00C2C67616212C00313353E1673"+
