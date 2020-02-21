@@ -1,0 +1,67 @@
+Custom command system
+----
+Important channel variables:
+  Special:
+  c_lasti: Start of last triggered instrument. Initialized on instrument trigger.
+  c_iptr: Current instrument execution pointer. If 0, instrument is inactive. Otherwise points to (c_iptr-1) in instrument data.
+  c_tnote: Base note value. Initialized from track data on note trigger.
+  c_inote: 8.8 fixed-point note value. High byte is semitone, low byte is fractional semitone / fine pitch. Initialized to (c_tnote . 0) on note/instrument trigger.
+
+  Initialized to 0 on new note:
+  c_iloop: Location to jump to on command 0. See c_iptr.
+  c_bendd: Bend delta. Signed value 2 * c_bendd added to c_inote (as 16 bit integer) each frame.
+  c_vpos: Vibrato cycle position/phase.
+  c_vdepth: Signed value sin(c_vpos) * c_vdepth / 64 temporarily added to c_inote (as 16 bit integer) before calculating frequency each frame.
+  c_vol: Channel volume, range 0-31.
+  c_vold: Volume delta. Signed value added to c_vol eac frame.
+  c_timer: Delay (in frames) until next command. See execution section below.
+
+  Other:
+  c_vrate: Vibrato rate. Added to c_vpos each frame. Initialized to 24 on note trigger.
+
+0-: Set c_iptr to c_iloop (jump to loop point, or stop by jumping to 0 if not set)
+1-: Set c_iloop = c_iptr (loop point = next command)
+2-: INVALID (end song)
+3x: Set c_bendd = x0
+4x: Set c_vrate = x0 / 2
+5x: Set c_vdepth = x0
+6x: Set c_vol = x*2
+7x: Set c_vold = x (signed)
+8-: INVALID (end song)
+9x: x is binary number abcd; if (noisevolume == 0) or (noiserelease >= 4-bcd) then {set noisevolume = ab*8; set noiserelease = 4-bcd}
+Ax: Set c_inote (high byte) = c_tnote + x
+Bx: Set c_inote (high byte) = c_tnote - x
+C-: INVALID (end song)
+Dx: Set c_timer = x
+Ex: Set c_timer = x * 16
+F-: End song
+
+Mnemonics (by me):
+0-: GOLP - GO to Loop Point
+1-: SELP - SEt Loop Point
+3x: BNDD - BeND Delta
+4x: VIBR - VIBrato Rate
+5x: VIBD - VIBrato Delta
+6x: VOLS - VOLume Set
+7x: VOLD - VOLume Delta
+9x: NOIS - NOISe parameters
+Ax: TPNU - TransPose Note Up
+Bx: TPND - TransPose Note Down
+Dx: WAIT - WAIT
+Ex: WLNG - Wait LoNG
+F-: ENDS - END Song
+
+Execution:
+  Advance song
+  For each channel:
+    If new track row:
+      If row has instrument number:
+        Get instrument pointer for (num-1) in pointer table, or 0 if instrument number is 0
+        Store pointer to c_lasti and c_iptr
+        Clear c_iloop and c_timer
+      If row has note number:
+        Set c_iptr = c_lasti
+        Initialize other registers (see above)
+    While c_iptr not 0 and c_timer is 0:
+      Execute next command
+      (MAY BE TERMINATED EARLY BY FRAME INTERRUPT IF TAKING TOO LONG)

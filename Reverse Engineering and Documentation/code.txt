@@ -1,0 +1,162 @@
+This file was a part of my reverse engineering process and shows a snippet of assembly code converted to JS-like pseudocode.
+
+		ldi	r28, lo8(ch)			; |
+		ldi	r29, hi8(ch)			;  \ Loop through channels with Y as channel pointer
+play_linech:
+		ldd	r30, Y+c_tptr			; |
+		ldd	r31, Y+c_tptr+1			;  \ Z = Start of current track data
+		mov	r16, r30
+		or	r16, r31
+		breq	play_notrack
+		ldd	r16, Y+c_tbits
+		ldi	r18, 2					; |
+		rcall	readchunk			;  \ Read 2 bits into r17 (getting flags)
+		mov	r19, r17				; r19 = r17 (flags)
+		sbrs	r19, 1				; |
+		rjmp	play_noinstr		;  \ Skip instrument reading if has-instrument flag false
+		ldi	r18, 5					; |
+		rcall	readchunk			;  \ Read 5 bits into r17 (instrument number)
+		movw	r26, r30			; Don't care
+		ldi	r30, lo8(m_instrtab-1)	; |
+		ldi	r31, hi8(m_instrtab-1)	;  \ Z = m_instrtab - 1
+		add	r30, r17				; |
+		adc	r31, r1					;  \ Z += r17 (offset into instrument pointer table starting at 1)
+		out	EEARH, r31				; |
+		out	EEARL, r30				;  \ EEPROM address = Z
+		out	EECR, r2				; EEPROM Control = 1 (Read enable)
+		in	r17, EEDR				; r17 = EEPROM Data
+		movw	r30, r26			; Don't care
+		std	Y+c_lasti, r17			; Channel last instrument = r17
+		std	Y+c_iptr, r17			; Channel instrument pointer = r17
+		std	Y+c_iloop, r1			; Channel instrument loop = 0
+		std	Y+c_timer, r1			; Channel instrument timer = 0
+play_noinstr:
+		sbrs	r19, 0				; |
+		rjmp	play_nonote			;  \ Skip note reading if has-note flag is false
+		ldi	r18, 7					; |
+		rcall	readchunk			; \ Read 7 bits into r17 (note number)
+		mov	r20, r16				; Don't care
+		mov	r16, r17				; r16 = r17 (note number)
+		subi	r16, 1				; r16--
+		ldd	r17, Y+c_lasti			; r17 = Channel last instrument
+		rcall	plonk				; Play note r16 using instrument ptr r17 with channel data at Y
+		mov	r16, r20				; Don't care
+play_nonote:
+		...							; Don't care
+
+Example: Read bitstream
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function play_sound(channels) {
+	for(var channelNum = 0; channelNum < 3; channelNum++) {
+		var channelStruct = channels[channelNum];
+		var timer;
+		while(true) {
+			var instrumentPointer = channelStruct.c_iptr
+			timer = channelStruct.c_timer
+			if(instrumentPointer <= 0) break;
+			if(timer != 0) break;
+
+			var commandByte = readCommand(instrumentPointer);
+
+			instrumentPointer++;
+			channelStruct.c_iptr = instrumentPointer;
+
+			runCommand(channelStruct, commandByte);
+		}
+
+		timer--;
+		if(timer >= 0) {
+			channelStruct.c_timer = timer;
+		}
+		var note = channelStruct.c_inote // here's our note value in 8.8 format
+
+		var vibPos = channelStruct.c_vpos;
+		var vibSine = sineTable[vibPos];
+		var vibDepth = channelStruct.c_vdepth;
+		var vibAmount = vibSine * vibDepth // r1:r0 is wanted vibrato offset times 64
+		var strayCarry = vibAmount >> 15;
+		var vibAmountHigh = 0;
+		if(vibAmount < 0) {
+			vibAmountHigh = 255;
+		}
+		vibAmountHigh = (vibAmountHigh << 2) | vibAmount >> 14;
+		vibAmount = ((vibAmount << 2) & 0xFFFF) | (strayCarry << 1);
+
+		note += (vibAmountHigh << 8) | (vibAmount >> 8); // update note
+		vibAmount = 0; // unused?
+
+		vibPos += channelStruct.c_vrate;
+		channelStruct.c_vpos = vibPos;
+
+		var freqIndex = note >> 8;
+		var freqIndexNext = freqIndex + 1;
+		// Added to prevent array length overflow
+		var maxIndex = freqTable.length - 1;
+		if(freqIndex >= maxIndex - 1) {
+			if(freqIndex >= maxIndex) {
+				freqIndex = maxIndex;
+			}
+			freqIndexNext = maxIndex;
+		}
+		var freq = freqTable[freqIndex];
+		var freqDist = freqTable[freqIndexNext] - freq;
+
+		// Now we want to compute freq += (dist * lo(note)) >> 8.
+		// The offset to add to freq will be stored in r25:r24.
+
+		var noteLow = note & 0xFF;
+		var multResult = (freqDist >> 8) * noteLow; // r1:r0 is product of hi(dist) and lo(note)
+		multResult += ((freqDist & 0xFF) * noteLow) >> 8; // r1:r0 is product of lo(dist) and lo(note)
+		
+		freq += multResult;
+		
+		note = channelStruct.c_inote;
+		var bendDelta = channelStruct.c_bendd;
+		if(bendDelta >= 0x80) {
+			bendDelta -= 256;
+		}
+		note += bendDelta + bendDelta;
+		note &= 0xFFFF;
+		if(note >= 0x8000) {
+			note = 0;
+		}
+		channelStruct.c_inote = note;
+
+		var volume = channelStruct.c_vol;
+		var volumeDelta = channelStruct.c_vold;
+		volume += volumeDelta;
+		volume &= 0xFF;
+		if(volume >= 0x80) { // clamp negative to 0
+			volume = 0;
+		}
+		if(volume >= 32) { // clamp to max
+			volume = 31;
+		}
+		
+		// stop oscillator if silent
+		if(volume == 0) {
+			freq = 0;
+		}
+		
+		channelStruct.c_freq = freq;
+		channelStruct.c_vol = volume;
+	}
+	n_vol = (n_vol - n_rel) & 0xFF;
+	if(n_vol >= 0x80) { // clamp negative to 0
+		n_vol = 0;
+	}
+}
