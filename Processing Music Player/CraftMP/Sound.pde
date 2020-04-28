@@ -181,7 +181,7 @@ public class CraftSampler {
 }
 
 public class CraftMusic {
-  int[] swingTable = {1,1,1,1,0,1,1,1,1,0,1,1,2,1,1,2};
+  int[] swingTable = {1,1,1,1,0,1,1,1,1,0,2,1,1,2,1,1};
   int swingIndex = 0;
   boolean debug = false;
   boolean highDac = false;
@@ -266,12 +266,14 @@ public class CraftMusic {
     sampleQueue.clear();
   }
   private void playroutineSwing() {
-    for(int i = 0; i < swingTable[swingIndex]; i++) 
-      playroutine();
+    for(int i = 0; i < swingTable[swingIndex]; i++) {
+      playroutine_time();
+    }
+    playroutine_sound();
     swingIndex++;
     if(swingIndex >= swingTable.length) swingIndex = 0;
   }
-  private void playroutine() {
+  private void playroutine_time() {
     if (!flag_songend) { // up to play_sound
       trackTimer--;
       if (trackTimer < 0) { // up to play_nonewline
@@ -335,6 +337,8 @@ public class CraftMusic {
         trackTimer = 4 - 1; // tempo - 1
       }
     }
+  }
+  private void playroutine_sound() {
     // play_sound
     for (int ch = 0; ch < 3; ch++) {
       int timer;
@@ -575,10 +579,12 @@ public class CraftMusic {
         soundroutine();
         vblankTime = 0;
         mode = 0;
-        if(enableSwing)
+        if(enableSwing) {
           playroutineSwing();
-        else
-          playroutine();
+        } else {
+          playroutine_time();
+          playroutine_sound();
+        }
         break;
       }
       soundroutine();
